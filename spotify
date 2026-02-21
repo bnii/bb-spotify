@@ -1,0 +1,354 @@
+#!/usr/bin/env bb
+
+(ns bb-spotify
+  (:require [babashka.http-client :as http]
+            [cheshire.core :as json]
+            [babashka.fs :as fs]
+            [babashka.process :as proc]
+            [clojure.string :as str]
+            [clojure.edn :as edn]
+            [org.httpkit.server :as server])
+  (:import [java.security MessageDigest SecureRandom]
+           [java.util Base64]))
+
+;; ── Constants ──────────────────────────────────────────────────────────────────
+
+(def config-dir (str (fs/expand-home "~/.config/bb-spotify")))
+(def tokens-file (str config-dir "/tokens.edn"))
+(def redirect-uri "http://127.0.0.1:8080/callback")
+(def auth-url "https://accounts.spotify.com/authorize")
+(def token-url "https://accounts.spotify.com/api/token")
+(def api-base "https://api.spotify.com/v1")
+(def scopes "user-read-private playlist-read-private playlist-modify-public playlist-modify-private user-read-playback-state user-modify-playback-state")
+
+(defn client-id []
+  (or (System/getenv "SPOTIFY_CLIENT_ID")
+      (do (println "Error: SPOTIFY_CLIENT_ID not set.")
+          (println "Export it in your shell profile:")
+          (println "  export SPOTIFY_CLIENT_ID=\"your_client_id_here\"")
+          (System/exit 1))))
+
+;; ── PKCE Helpers ───────────────────────────────────────────────────────────────
+
+(defn random-bytes [n]
+  (let [bytes (byte-array n)]
+    (.nextBytes (SecureRandom.) bytes)
+    bytes))
+
+(defn base64url [^bytes bs]
+  (-> (Base64/getUrlEncoder)
+      (.withoutPadding)
+      (.encodeToString bs)))
+
+(defn code-verifier []
+  (base64url (random-bytes 32)))
+
+(defn code-challenge [verifier]
+  (let [digest (MessageDigest/getInstance "SHA-256")
+        hash (.digest digest (.getBytes verifier "US-ASCII"))]
+    (base64url hash)))
+
+;; ── Token Management ──────────────────────────────────────────────────────────
+
+(defn load-tokens []
+  (when (fs/exists? tokens-file)
+    (edn/read-string (slurp tokens-file))))
+
+(defn save-tokens! [tokens]
+  (fs/create-dirs config-dir)
+  (spit tokens-file (pr-str tokens)))
+
+(defn tokens-expired? [tokens]
+  (let [expires-at (:expires-at tokens 0)]
+    (< expires-at (+ (System/currentTimeMillis) 60000))))
+
+(defn refresh-tokens! [tokens]
+  (let [resp (http/post token-url
+               {:form-params {"grant_type"    "refresh_code"
+                               "refresh_token" (:refresh-token tokens)
+                               "client_id"     (client-id)}
+                :headers {"Content-Type" "application/x-www-form-urlencoded"}
+                :throw false})
+        body (json/parse-string (:body resp) true)]
+    (if (:access_token body)
+      (let [new-tokens {:access-token  (:access_token body)
+                        :refresh-token (or (:refresh_token body) (:refresh-token tokens))
+                        :expires-at    (+ (System/currentTimeMillis) (* (:expires_in body) 1000))}]
+        (save-tokens! new-tokens)
+        new-tokens)
+      (do (println "Token refresh failed:" (:error body) "-" (:error_description body))
+          (println "Run: spotify auth")
+          (System/exit 1)))))
+
+(defn get-access-token! []
+  (let [tokens (load-tokens)]
+    (when-not tokens
+      (println "Not authenticated. Run: spotify auth")
+      (System/exit 1))
+    (let [tokens (if (tokens-expired? tokens)
+                   (refresh-tokens! tokens)
+                   tokens)]
+      (:access-token tokens))))
+
+;; ── OAuth Auth Flow ───────────────────────────────────────────────────────────
+
+(defn auth! []
+  (let [verifier  (code-verifier)
+        challenge (code-challenge verifier)
+        cid       (client-id)
+        state     (base64url (random-bytes 16))
+        result    (promise)
+        auth-uri  (str auth-url "?"
+                       "client_id=" cid
+                       "&response_type=code"
+                       "&redirect_uri=" (java.net.URLEncoder/encode redirect-uri "UTF-8")
+                       "&scope=" (java.net.URLEncoder/encode scopes "UTF-8")
+                       "&code_challenge_method=S256"
+                       "&code_challenge=" challenge
+                       "&state=" state)
+        handler   (fn [req]
+                    (let [params (into {}
+                                  (map (fn [p]
+                                         (let [[k v] (str/split p #"=" 2)]
+                                           [k (java.net.URLDecoder/decode (or v "") "UTF-8")]))
+                                       (str/split (or (:query-string req) "") #"&")))]
+                      (if (get params "error")
+                        (do (deliver result {:error (get params "error")})
+                            {:status 200 :body "Authorization denied. You can close this window."})
+                        (do (deliver result {:code (get params "code")})
+                            {:status 200 :body "Authorization successful! You can close this window."}))))
+        stop-fn   (server/run-server handler {:ip "127.0.0.1" :port 8080})]
+    (println "Opening Spotify authorization in browser...")
+    (proc/shell {:out :inherit :err :inherit} "open" auth-uri)
+    (println "Waiting for callback on" redirect-uri "...")
+    (let [res (deref result 120000 {:error "timeout"})]
+      (stop-fn)
+      (if (:error res)
+        (do (println "Auth failed:" (:error res))
+            (System/exit 1))
+        ;; Exchange code for tokens
+        (let [resp (http/post token-url
+                     {:form-params {"grant_type"    "authorization_code"
+                                    "code"          (:code res)
+                                    "redirect_uri"  redirect-uri
+                                    "client_id"     cid
+                                    "code_verifier" verifier}
+                      :headers {"Content-Type" "application/x-www-form-urlencoded"}
+                      :throw false})
+              body (json/parse-string (:body resp) true)]
+          (if (:access_token body)
+            (let [tokens {:access-token  (:access_token body)
+                          :refresh-token (:refresh_token body)
+                          :expires-at    (+ (System/currentTimeMillis) (* (:expires_in body) 1000))}]
+              (save-tokens! tokens)
+              (println "Auth successful! Tokens saved to" tokens-file))
+            (do (println "Token exchange failed:" (:error body) "-" (:error_description body))
+                (System/exit 1))))))))
+
+;; ── API Client ────────────────────────────────────────────────────────────────
+
+(defn api!
+  ([method path] (api! method path nil))
+  ([method path opts]
+   (let [token (get-access-token!)
+         url   (if (str/starts-with? path "http") path (str api-base path))
+         resp  (http/request
+                 (merge {:method  method
+                         :uri     url
+                         :headers {"Authorization" (str "Bearer " token)
+                                   "Content-Type"  "application/json"}
+                         :throw   false}
+                        opts))
+         body  (when (and (:body resp) (not (str/blank? (:body resp))))
+                 (json/parse-string (:body resp) true))]
+     (if (<= 200 (:status resp) 299)
+       body
+       (do (println (str "API error: " (or (:error (:error body))
+                                            (:message (:error body))
+                                            (str "HTTP " (:status resp)))))
+           (System/exit 1))))))
+
+;; ── Commands ──────────────────────────────────────────────────────────────────
+
+(defn cmd-search [args]
+  (when (empty? args)
+    (println "Usage: spotify search <query>")
+    (System/exit 1))
+  (let [query (str/join " " args)
+        resp  (api! :get (str "/search?type=track&limit=10&q="
+                              (java.net.URLEncoder/encode query "UTF-8")))
+        tracks (get-in resp [:tracks :items])]
+    (if (empty? tracks)
+      (println "No results found.")
+      (do
+        (println (format "%-5s %-40s %-25s %s" "#" "Track" "Artist" "URI"))
+        (println (apply str (repeat 100 "-")))
+        (doseq [[i track] (map-indexed vector tracks)]
+          (println (format "%-5d %-40s %-25s %s"
+                    (inc i)
+                    (subs (:name track) 0 (min 40 (count (:name track))))
+                    (subs (str/join ", " (map :name (:artists track)))
+                          0 (min 25 (count (str/join ", " (map :name (:artists track))))))
+                    (:uri track))))))))
+
+(defn cmd-playlists []
+  (let [resp  (api! :get "/me/playlists?limit=50")
+        lists (:items resp)]
+    (if (empty? lists)
+      (println "No playlists found.")
+      (do
+        (println (format "%-40s %-10s %s" "Name" "Tracks" "ID"))
+        (println (apply str (repeat 80 "-")))
+        (doseq [pl lists]
+          (println (format "%-40s %-10d %s"
+                    (subs (:name pl) 0 (min 40 (count (:name pl))))
+                    (get-in pl [:tracks :total] 0)
+                    (:id pl))))))))
+
+(defn cmd-playlist-create [args]
+  (when (empty? args)
+    (println "Usage: spotify playlist create <name>")
+    (System/exit 1))
+  (let [name  (str/join " " args)
+        me    (api! :get "/me")
+        resp  (api! :post (str "/users/" (:id me) "/playlists")
+                {:body (json/generate-string {:name name :public false})})]
+    (println "Created playlist:")
+    (println "  Name:" (:name resp))
+    (println "  ID:  " (:id resp))
+    (println "  URI: " (:uri resp))))
+
+(defn cmd-playlist-add [args]
+  (when (< (count args) 2)
+    (println "Usage: spotify playlist add <id> <uri> [uri...]")
+    (System/exit 1))
+  (let [id   (first args)
+        uris (rest args)]
+    (api! :post (str "/playlists/" id "/tracks")
+      {:body (json/generate-string {:uris (vec uris)})})
+    (println (str "Added " (count uris) " track(s) to playlist " id))))
+
+(defn cmd-playlist-remove [args]
+  (when (< (count args) 2)
+    (println "Usage: spotify playlist remove <id> <uri> [uri...]")
+    (System/exit 1))
+  (let [id   (first args)
+        uris (rest args)]
+    (api! :delete (str "/playlists/" id "/tracks")
+      {:body (json/generate-string {:tracks (mapv (fn [u] {:uri u}) uris)})})
+    (println (str "Removed " (count uris) " track(s) from playlist " id))))
+
+(defn cmd-playlist-show [args]
+  (when (empty? args)
+    (println "Usage: spotify playlist show <id>")
+    (System/exit 1))
+  (let [id   (first args)
+        resp (api! :get (str "/playlists/" id "/tracks?limit=100"))
+        items (:items resp)]
+    (if (empty? items)
+      (println "Playlist is empty.")
+      (do
+        (println (format "%-5s %-40s %s" "#" "Track" "Artist"))
+        (println (apply str (repeat 75 "-")))
+        (doseq [[i item] (map-indexed vector items)]
+          (let [track (:track item)]
+            (println (format "%-5d %-40s %s"
+                      (inc i)
+                      (subs (:name track) 0 (min 40 (count (:name track))))
+                      (str/join ", " (map :name (:artists track)))))))))))
+
+(defn cmd-play [args]
+  (if (empty? args)
+    (do (api! :put "/me/player/play" {:body "{}"})
+        (println "Resumed playback."))
+    (let [uri (first args)]
+      (if (str/includes? uri "track")
+        (api! :put "/me/player/play"
+          {:body (json/generate-string {:uris [uri]})})
+        (api! :put "/me/player/play"
+          {:body (json/generate-string {:context_uri uri})}))
+      (println "Playing:" uri))))
+
+(defn cmd-pause []
+  (api! :put "/me/player/pause" {:body "{}"})
+  (println "Paused."))
+
+(defn cmd-resume []
+  (api! :put "/me/player/play" {:body "{}"})
+  (println "Resumed."))
+
+(defn cmd-next []
+  (api! :post "/me/player/next")
+  (println "Skipped to next track."))
+
+(defn cmd-prev []
+  (api! :post "/me/player/previous")
+  (println "Went to previous track."))
+
+(defn cmd-queue [args]
+  (when (empty? args)
+    (println "Usage: spotify queue <track-uri>")
+    (System/exit 1))
+  (let [uri (first args)]
+    (api! :post (str "/me/player/queue?uri=" (java.net.URLEncoder/encode uri "UTF-8")))
+    (println "Queued:" uri)))
+
+(defn cmd-now []
+  (let [resp (api! :get "/me/player/currently-playing")]
+    (if (or (nil? resp) (nil? (:item resp)))
+      (println "Nothing is currently playing.")
+      (let [track (:item resp)]
+        (println "Playing:")
+        (println "  " (:name track) "-" (str/join ", " (map :name (:artists track))))
+        (println "  Album:" (get-in track [:album :name]))
+        (println "  URI:  " (:uri track))
+        (println (str "  Progress: " (quot (:progress_ms resp) 1000) "s / "
+                      (quot (:duration_ms track) 1000) "s"))))))
+
+;; ── CLI Dispatch ──────────────────────────────────────────────────────────────
+
+(defn usage []
+  (println "Usage: spotify <command> [args]")
+  (println)
+  (println "Commands:")
+  (println "  auth                          Authenticate with Spotify")
+  (println "  search <query>                Search for tracks")
+  (println "  playlists                     List your playlists")
+  (println "  playlist create <name>        Create a new playlist")
+  (println "  playlist add <id> <uri>...    Add tracks to a playlist")
+  (println "  playlist remove <id> <uri>... Remove tracks from a playlist")
+  (println "  playlist show <id>            Show playlist contents")
+  (println "  play [uri]                    Play a track or playlist")
+  (println "  pause                         Pause playback")
+  (println "  resume                        Resume playback")
+  (println "  next                          Skip to next track")
+  (println "  prev                          Go to previous track")
+  (println "  queue <uri>                   Add track to queue")
+  (println "  now                           Show currently playing"))
+
+(let [args *command-line-args*
+      cmd  (first args)
+      rest-args (rest args)]
+  (case cmd
+    "auth"     (auth!)
+    "search"   (cmd-search rest-args)
+    "playlists" (cmd-playlists)
+    "playlist" (let [subcmd (first rest-args)
+                     sub-args (rest rest-args)]
+                 (case subcmd
+                   "create" (cmd-playlist-create sub-args)
+                   "add"    (cmd-playlist-add sub-args)
+                   "remove" (cmd-playlist-remove sub-args)
+                   "show"   (cmd-playlist-show sub-args)
+                   (do (println "Unknown playlist command:" subcmd)
+                       (usage)
+                       (System/exit 1))))
+    "play"     (cmd-play rest-args)
+    "pause"    (cmd-pause)
+    "resume"   (cmd-resume)
+    "next"     (cmd-next)
+    "prev"     (cmd-prev)
+    "queue"    (cmd-queue rest-args)
+    "now"      (cmd-now)
+    (do (usage)
+        (when cmd (System/exit 1)))))
