@@ -13,7 +13,7 @@ A single-file Babashka CLI for Spotify. No daemon, no external deps — just a s
 
 1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
 2. Click **Create App**
-3. In **Settings** > **Redirect URIs**, add: `http://127.0.0.1:8080/callback`
+3. In **Settings** > **Redirect URIs**, add: `http://127.0.0.1:12983/callback`
 4. Copy the **Client ID**
 
 ### 2. Set environment variable

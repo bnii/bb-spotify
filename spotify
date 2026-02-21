@@ -15,7 +15,7 @@
 
 (def config-dir (str (fs/expand-home "~/.config/bb-spotify")))
 (def tokens-file (str config-dir "/tokens.edn"))
-(def redirect-uri "http://127.0.0.1:8080/callback")
+(def redirect-uri "http://127.0.0.1:12983/callback")
 (def auth-url "https://accounts.spotify.com/authorize")
 (def token-url "https://accounts.spotify.com/api/token")
 (def api-base "https://api.spotify.com/v1")
@@ -26,7 +26,7 @@
       (do (println "Error: SPOTIFY_CLIENT_ID not set.")
           (println "Export it in your shell profile:")
           (println "  export SPOTIFY_CLIENT_ID=\"your_client_id_here\"")
-          (System/exit 1))))
+          (throw (ex-info "" {:babashka/exit 1})))))
 
 ;; ── PKCE Helpers ───────────────────────────────────────────────────────────────
 
@@ -63,13 +63,15 @@
     (< expires-at (+ (System/currentTimeMillis) 60000))))
 
 (defn refresh-tokens! [tokens]
-  (let [resp (http/post token-url
-               {:form-params {"grant_type"    "refresh_code"
-                               "refresh_token" (:refresh-token tokens)
-                               "client_id"     (client-id)}
+  (let [form-body (str "grant_type=refresh_token"
+                       "&refresh_token=" (java.net.URLEncoder/encode (:refresh-token tokens) "UTF-8")
+                       "&client_id=" (java.net.URLEncoder/encode (client-id) "UTF-8"))
+        resp (http/post token-url
+               {:body    form-body
                 :headers {"Content-Type" "application/x-www-form-urlencoded"}
-                :throw false})
-        body (json/parse-string (:body resp) true)]
+                :throw   false})
+        body (when (and (:body resp) (not (str/blank? (:body resp))))
+               (json/parse-string (:body resp) true))]
     (if (:access_token body)
       (let [new-tokens {:access-token  (:access_token body)
                         :refresh-token (or (:refresh_token body) (:refresh-token tokens))
@@ -78,13 +80,13 @@
         new-tokens)
       (do (println "Token refresh failed:" (:error body) "-" (:error_description body))
           (println "Run: spotify auth")
-          (System/exit 1)))))
+          (throw (ex-info "" {:babashka/exit 1}))))))
 
 (defn get-access-token! []
   (let [tokens (load-tokens)]
     (when-not tokens
       (println "Not authenticated. Run: spotify auth")
-      (System/exit 1))
+      (throw (ex-info "" {:babashka/exit 1})))
     (let [tokens (if (tokens-expired? tokens)
                    (refresh-tokens! tokens)
                    tokens)]
@@ -107,17 +109,19 @@
                        "&code_challenge=" challenge
                        "&state=" state)
         handler   (fn [req]
-                    (let [params (into {}
-                                  (map (fn [p]
-                                         (let [[k v] (str/split p #"=" 2)]
-                                           [k (java.net.URLDecoder/decode (or v "") "UTF-8")]))
-                                       (str/split (or (:query-string req) "") #"&")))]
-                      (if (get params "error")
-                        (do (deliver result {:error (get params "error")})
-                            {:status 200 :body "Authorization denied. You can close this window."})
-                        (do (deliver result {:code (get params "code")})
-                            {:status 200 :body "Authorization successful! You can close this window."}))))
-        stop-fn   (server/run-server handler {:ip "127.0.0.1" :port 8080})]
+                    (if (not= (:uri req) "/callback")
+                      {:status 404 :body "Not found"}
+                      (let [params (into {}
+                                    (map (fn [p]
+                                           (let [[k v] (str/split p #"=" 2)]
+                                             [k (java.net.URLDecoder/decode (or v "") "UTF-8")]))
+                                         (str/split (or (:query-string req) "") #"&")))]
+                        (if (get params "error")
+                          (do (deliver result {:error (get params "error")})
+                              {:status 200 :body "Authorization denied. You can close this window."})
+                          (do (deliver result {:code (get params "code")})
+                              {:status 200 :body "Authorization successful! You can close this window."})))))
+        stop-fn   (server/run-server handler {:ip "127.0.0.1" :port 12983})]
     (println "Opening Spotify authorization in browser...")
     (proc/shell {:out :inherit :err :inherit} "open" auth-uri)
     (println "Waiting for callback on" redirect-uri "...")
@@ -125,17 +129,19 @@
       (stop-fn)
       (if (:error res)
         (do (println "Auth failed:" (:error res))
-            (System/exit 1))
+            (throw (ex-info "" {:babashka/exit 1})))
         ;; Exchange code for tokens
-        (let [resp (http/post token-url
-                     {:form-params {"grant_type"    "authorization_code"
-                                    "code"          (:code res)
-                                    "redirect_uri"  redirect-uri
-                                    "client_id"     cid
-                                    "code_verifier" verifier}
+        (let [form-body (str "grant_type=authorization_code"
+                             "&code=" (java.net.URLEncoder/encode (:code res) "UTF-8")
+                             "&redirect_uri=" (java.net.URLEncoder/encode redirect-uri "UTF-8")
+                             "&client_id=" (java.net.URLEncoder/encode cid "UTF-8")
+                             "&code_verifier=" (java.net.URLEncoder/encode verifier "UTF-8"))
+              resp (http/post token-url
+                     {:body    form-body
                       :headers {"Content-Type" "application/x-www-form-urlencoded"}
-                      :throw false})
-              body (json/parse-string (:body resp) true)]
+                      :throw   false})
+              body (when (and (:body resp) (not (str/blank? (:body resp))))
+                     (json/parse-string (:body resp) true))]
           (if (:access_token body)
             (let [tokens {:access-token  (:access_token body)
                           :refresh-token (:refresh_token body)
@@ -143,7 +149,7 @@
               (save-tokens! tokens)
               (println "Auth successful! Tokens saved to" tokens-file))
             (do (println "Token exchange failed:" (:error body) "-" (:error_description body))
-                (System/exit 1))))))))
+                (throw (ex-info "" {:babashka/exit 1})))))))))
 
 ;; ── API Client ────────────────────────────────────────────────────────────────
 
@@ -159,21 +165,22 @@
                                    "Content-Type"  "application/json"}
                          :throw   false}
                         opts))
-         body  (when (and (:body resp) (not (str/blank? (:body resp))))
-                 (json/parse-string (:body resp) true))]
+         raw   (:body resp)
+         body  (when (and raw (not (str/blank? raw)) (str/starts-with? (str/triml raw) "{"))
+                 (json/parse-string raw true))]
      (if (<= 200 (:status resp) 299)
        body
        (do (println (str "API error: " (or (:error (:error body))
                                             (:message (:error body))
                                             (str "HTTP " (:status resp)))))
-           (System/exit 1))))))
+           (throw (ex-info "" {:babashka/exit 1})))))))
 
 ;; ── Commands ──────────────────────────────────────────────────────────────────
 
 (defn cmd-search [args]
   (when (empty? args)
     (println "Usage: spotify search <query>")
-    (System/exit 1))
+    (throw (ex-info "" {:babashka/exit 1})))
   (let [query (str/join " " args)
         resp  (api! :get (str "/search?type=track&limit=10&q="
                               (java.net.URLEncoder/encode query "UTF-8")))
@@ -208,7 +215,7 @@
 (defn cmd-playlist-create [args]
   (when (empty? args)
     (println "Usage: spotify playlist create <name>")
-    (System/exit 1))
+    (throw (ex-info "" {:babashka/exit 1})))
   (let [name  (str/join " " args)
         me    (api! :get "/me")
         resp  (api! :post (str "/users/" (:id me) "/playlists")
@@ -221,7 +228,7 @@
 (defn cmd-playlist-add [args]
   (when (< (count args) 2)
     (println "Usage: spotify playlist add <id> <uri> [uri...]")
-    (System/exit 1))
+    (throw (ex-info "" {:babashka/exit 1})))
   (let [id   (first args)
         uris (rest args)]
     (api! :post (str "/playlists/" id "/tracks")
@@ -231,7 +238,7 @@
 (defn cmd-playlist-remove [args]
   (when (< (count args) 2)
     (println "Usage: spotify playlist remove <id> <uri> [uri...]")
-    (System/exit 1))
+    (throw (ex-info "" {:babashka/exit 1})))
   (let [id   (first args)
         uris (rest args)]
     (api! :delete (str "/playlists/" id "/tracks")
@@ -241,7 +248,7 @@
 (defn cmd-playlist-show [args]
   (when (empty? args)
     (println "Usage: spotify playlist show <id>")
-    (System/exit 1))
+    (throw (ex-info "" {:babashka/exit 1})))
   (let [id   (first args)
         resp (api! :get (str "/playlists/" id "/tracks?limit=100"))
         items (:items resp)]
@@ -270,11 +277,11 @@
       (println "Playing:" uri))))
 
 (defn cmd-pause []
-  (api! :put "/me/player/pause" {:body "{}"})
+  (api! :put "/me/player/pause")
   (println "Paused."))
 
 (defn cmd-resume []
-  (api! :put "/me/player/play" {:body "{}"})
+  (api! :put "/me/player/play")
   (println "Resumed."))
 
 (defn cmd-next []
@@ -288,7 +295,7 @@
 (defn cmd-queue [args]
   (when (empty? args)
     (println "Usage: spotify queue <track-uri>")
-    (System/exit 1))
+    (throw (ex-info "" {:babashka/exit 1})))
   (let [uri (first args)]
     (api! :post (str "/me/player/queue?uri=" (java.net.URLEncoder/encode uri "UTF-8")))
     (println "Queued:" uri)))
@@ -340,9 +347,10 @@
                    "add"    (cmd-playlist-add sub-args)
                    "remove" (cmd-playlist-remove sub-args)
                    "show"   (cmd-playlist-show sub-args)
-                   (do (println "Unknown playlist command:" subcmd)
+                   (do (when subcmd
+                         (println "Unknown playlist command:" subcmd))
                        (usage)
-                       (System/exit 1))))
+                       (throw (ex-info "" {:babashka/exit 1})))))
     "play"     (cmd-play rest-args)
     "pause"    (cmd-pause)
     "resume"   (cmd-resume)
@@ -351,4 +359,4 @@
     "queue"    (cmd-queue rest-args)
     "now"      (cmd-now)
     (do (usage)
-        (when cmd (System/exit 1)))))
+        (when cmd (throw (ex-info "" {:babashka/exit 1}))))))
