@@ -21,11 +21,22 @@
 (def api-base "https://api.spotify.com/v1")
 (def scopes "user-read-private playlist-read-private playlist-modify-public playlist-modify-private user-read-playback-state user-modify-playback-state")
 
+(def config-file (str config-dir "/config.edn"))
+
+(defn load-config []
+  (when (fs/exists? config-file)
+    (edn/read-string (slurp config-file))))
+
+(defn save-config! [m]
+  (fs/create-dirs config-dir)
+  (spit config-file (pr-str (merge (load-config) m))))
+
 (defn client-id []
   (or (System/getenv "SPOTIFY_CLIENT_ID")
-      (do (println "Error: SPOTIFY_CLIENT_ID not set.")
-          (println "Export it in your shell profile:")
-          (println "  export SPOTIFY_CLIENT_ID=\"your_client_id_here\"")
+      (:client-id (load-config))
+      (do (println "Error: No client ID configured.")
+          (println "Run: spotify auth <client-id>")
+          (println "Or:  export SPOTIFY_CLIENT_ID=\"your_client_id_here\"")
           (throw (ex-info "" {:babashka/exit 1})))))
 
 ;; ── PKCE Helpers ───────────────────────────────────────────────────────────────
@@ -94,7 +105,10 @@
 
 ;; ── OAuth Auth Flow ───────────────────────────────────────────────────────────
 
-(defn auth! []
+(defn auth! [args]
+  (when-let [cid-arg (first args)]
+    (save-config! {:client-id cid-arg})
+    (println "Client ID saved."))
   (let [verifier  (code-verifier)
         challenge (code-challenge verifier)
         cid       (client-id)
@@ -315,29 +329,66 @@
 ;; ── CLI Dispatch ──────────────────────────────────────────────────────────────
 
 (defn usage []
-  (println "Usage: spotify <command> [args]")
-  (println)
-  (println "Commands:")
-  (println "  auth                          Authenticate with Spotify")
-  (println "  search <query>                Search for tracks")
-  (println "  playlists                     List your playlists")
-  (println "  playlist create <name>        Create a new playlist")
-  (println "  playlist add <id> <uri>...    Add tracks to a playlist")
-  (println "  playlist remove <id> <uri>... Remove tracks from a playlist")
-  (println "  playlist show <id>            Show playlist contents")
-  (println "  play [uri]                    Play a track or playlist")
-  (println "  pause                         Pause playback")
-  (println "  resume                        Resume playback")
-  (println "  next                          Skip to next track")
-  (println "  prev                          Go to previous track")
-  (println "  queue <uri>                   Add track to queue")
-  (println "  now                           Show currently playing"))
+  (println "bb-spotify — Babashka CLI for the Spotify Web API
+
+USAGE
+  spotify <command> [args]
+
+SETUP
+  spotify auth <client-id>    Save client ID and authenticate via browser OAuth (PKCE).
+                              Get a client ID from https://developer.spotify.com/dashboard
+                              Redirect URI must be set to: http://127.0.0.1:12983/callback
+                              Tokens are stored in ~/.config/bb-spotify/tokens.edn
+                              Client ID is stored in ~/.config/bb-spotify/config.edn
+                              Alternatively set SPOTIFY_CLIENT_ID env var (takes precedence).
+
+SEARCH
+  spotify search <query>      Search tracks. Returns up to 10 results.
+                              Output columns: #, Track, Artist, URI
+                              Example: spotify search \"All Blues Miles Davis\"
+
+PLAYLISTS
+  spotify playlists                       List all user playlists. Output: Name, Tracks, ID
+  spotify playlist create <name>          Create a new private playlist. Returns ID and URI.
+  spotify playlist show <id>              List tracks in a playlist. Output: #, Track, Artist
+  spotify playlist add <id> <uri>...      Add one or more tracks by URI. Batch supported.
+  spotify playlist remove <id> <uri>...   Remove one or more tracks by URI.
+
+PLAYBACK (requires an active Spotify device)
+  spotify play [uri]          With no args: resume playback.
+                              With a track URI (spotify:track:...): play that track.
+                              With a playlist URI (spotify:playlist:...): play that playlist.
+  spotify pause               Pause playback.
+  spotify resume              Resume playback (alias for play with no args).
+  spotify next                Skip to next track.
+  spotify prev                Go to previous track.
+  spotify queue <uri>         Add a track URI to the playback queue.
+  spotify now                 Show currently playing track, album, URI, and progress.
+
+URI FORMAT
+  Track:    spotify:track:<id>       (from search results)
+  Playlist: spotify:playlist:<id>    (from playlists command)
+
+COMMON WORKFLOWS
+  # Search and add tracks to a playlist:
+  spotify search \"Blue Monk Thelonious Monk\"
+  spotify playlist add <playlist-id> spotify:track:<track-id>
+
+  # Create playlist, add multiple tracks, then play:
+  spotify playlist create \"My Playlist\"
+  spotify playlist add <id> spotify:track:aaa spotify:track:bbb spotify:track:ccc
+  spotify play spotify:playlist:<id>
+
+ERRORS
+  \"Not authenticated\"        → Run: spotify auth <client-id>
+  \"No active device found\"   → Open Spotify on a device and play/pause something first.
+  \"Restriction violated\"     → Action not possible in current state (e.g. prev with no history)."))
 
 (let [args *command-line-args*
       cmd  (first args)
       rest-args (rest args)]
   (case cmd
-    "auth"     (auth!)
+    "auth"     (auth! rest-args)
     "search"   (cmd-search rest-args)
     "playlists" (cmd-playlists)
     "playlist" (let [subcmd (first rest-args)
