@@ -374,12 +374,27 @@
   (println "Went to previous track."))
 
 (defn cmd-queue [args]
-  (when (empty? args)
-    (println "Usage: spotify queue <track-uri>")
-    (throw (ex-info "" {:babashka/exit 1})))
-  (let [uri (first args)]
-    (api! :post (str "/me/player/queue?uri=" (java.net.URLEncoder/encode uri "UTF-8")))
-    (println "Queued:" uri)))
+  (if (empty? args)
+    (let [resp (api! :get "/me/player/queue")
+          current (:currently_playing resp)
+          upcoming (:queue resp)]
+      (if (and (nil? current) (empty? upcoming))
+        (println "Queue is empty.")
+        (do
+          (when current
+            (println (str "▶ " (:name current) " - "
+                          (str/join ", " (map :name (:artists current))))))
+          (when (seq upcoming)
+            (println (format "\n%-5s %-40s %s" "#" "Track" "Artist"))
+            (println (apply str (repeat 75 "-")))
+            (doseq [[i track] (map-indexed vector upcoming)]
+              (println (format "%-5d %-40s %s"
+                        (inc i)
+                        (subs (:name track) 0 (min 40 (count (:name track))))
+                        (str/join ", " (map :name (:artists track))))))))))
+    (let [uri (first args)]
+      (api! :post (str "/me/player/queue?uri=" (java.net.URLEncoder/encode uri "UTF-8")))
+      (println "Queued:" uri))))
 
 (defn cmd-now []
   (let [resp (api! :get "/me/player/currently-playing")]
@@ -472,6 +487,7 @@ PLAYBACK (requires an active Spotify device)
   spotify resume              Resume playback (alias for play with no args).
   spotify next                Skip to next track.
   spotify prev                Go to previous track.
+  spotify queue               Show the playback queue (now playing + upcoming).
   spotify queue <uri>         Add a track URI to the playback queue.
   spotify now                 Show currently playing track, album, URI, and progress.
 
