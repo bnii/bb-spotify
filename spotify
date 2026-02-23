@@ -327,17 +327,35 @@
     (println (str "Transferred playback to " (:name device)
                   (when play? " (playing)")))))
 
+(defn resolve-playlist [name]
+  (let [lists  (paginate "/me/playlists?limit=50" :items)
+        needle (str/lower-case name)
+        match  (or (first (filter #(= (str/lower-case (:name %)) needle) lists))
+                   (first (filter #(str/includes? (str/lower-case (:name %)) needle) lists)))]
+    (when-not match
+      (println (str "No playlist matching \"" name "\" found."))
+      (println "Your playlists:")
+      (doseq [pl lists]
+        (println (str "  " (:name pl) " — " (:id pl))))
+      (throw (ex-info "" {:babashka/exit 1})))
+    match))
+
 (defn cmd-play [args]
   (if (empty? args)
     (do (api! :put "/me/player/play" {:body "{}"})
         (println "Resumed playback."))
-    (let [uri (first args)]
-      (if (str/starts-with? uri "spotify:track:")
-        (api! :put "/me/player/play"
-          {:body (json/generate-string {:uris [uri]})})
-        (api! :put "/me/player/play"
-          {:body (json/generate-string {:context_uri uri})}))
-      (println "Playing:" uri))))
+    (let [input (str/join " " args)]
+      (if (str/starts-with? input "spotify:")
+        (do (if (str/starts-with? input "spotify:track:")
+              (api! :put "/me/player/play"
+                {:body (json/generate-string {:uris [input]})})
+              (api! :put "/me/player/play"
+                {:body (json/generate-string {:context_uri input})}))
+            (println "Playing:" input))
+        (let [pl (resolve-playlist input)]
+          (api! :put "/me/player/play"
+            {:body (json/generate-string {:context_uri (:uri pl)})})
+          (println "Playing:" (:name pl)))))))
 
 (defn cmd-pause []
   (api! :put "/me/player/pause")
@@ -402,7 +420,14 @@
           (catch Exception _ nil))
 
         (and (= cmd "device") (= cword 3))
-        (emit! ["play"])))
+        (emit! ["play"])
+
+        (and (= cmd "play") (= cword 2))
+        (try
+          (let [lists (binding [*out* (java.io.StringWriter.)]
+                        (paginate "/me/playlists?limit=50" :items))]
+            (emit! (map :name lists)))
+          (catch Exception _ nil))))
     (catch Exception _ nil)))
 
 ;; ── CLI Dispatch ──────────────────────────────────────────────────────────────
