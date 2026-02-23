@@ -300,12 +300,14 @@
                     (:type d)
                     (:id d))))))))
 
+(defn match-device [devs name-or-id]
+  (let [needle (str/lower-case name-or-id)]
+    (or (first (filter #(= (:id %) name-or-id) devs))
+        (first (filter #(str/includes? (str/lower-case (:name %)) needle) devs)))))
+
 (defn resolve-device [name-or-id]
-  (let [resp (api! :get "/me/player/devices")
-        devs (:devices resp)
-        needle (str/lower-case name-or-id)
-        match (or (first (filter #(= (:id %) name-or-id) devs))
-                  (first (filter #(str/includes? (str/lower-case (:name %)) needle) devs)))]
+  (let [devs (:devices (api! :get "/me/player/devices"))
+        match (match-device devs name-or-id)]
     (when-not match
       (println (str "No device matching \"" name-or-id "\" found."))
       (println "Available devices:")
@@ -327,11 +329,14 @@
     (println (str "Transferred playback to " (:name device)
                   (when play? " (playing)")))))
 
+(defn match-playlist [lists name]
+  (let [needle (str/lower-case name)]
+    (or (first (filter #(= (str/lower-case (:name %)) needle) lists))
+        (first (filter #(str/includes? (str/lower-case (:name %)) needle) lists)))))
+
 (defn resolve-playlist [name]
-  (let [lists  (paginate "/me/playlists?limit=50" :items)
-        needle (str/lower-case name)
-        match  (or (first (filter #(= (str/lower-case (:name %)) needle) lists))
-                   (first (filter #(str/includes? (str/lower-case (:name %)) needle) lists)))]
+  (let [lists (paginate "/me/playlists?limit=50" :items)
+        match (match-playlist lists name)]
     (when-not match
       (println (str "No playlist matching \"" name "\" found."))
       (println "Your playlists:")
@@ -510,34 +515,35 @@ ERRORS
   \"No active device found\"   → Run: spotify devices, then: spotify device <id> play
   \"Restriction violated\"     → Action not possible in current state (e.g. prev with no history)."))
 
-(let [args *command-line-args*
-      cmd  (first args)
-      rest-args (rest args)]
-  (case cmd
-    "auth"     (auth! rest-args)
-    "search"   (cmd-search rest-args)
-    "playlists" (cmd-playlists)
-    "playlist" (let [subcmd (first rest-args)
-                     sub-args (rest rest-args)]
-                 (case subcmd
-                   "create" (cmd-playlist-create sub-args)
-                   "add"    (cmd-playlist-add sub-args)
-                   "remove" (cmd-playlist-remove sub-args)
-                   "show"   (cmd-playlist-show sub-args)
-                   (do (when subcmd
-                         (println "Unknown playlist command:" subcmd))
-                       (usage)
-                       (throw (ex-info "" {:babashka/exit 1})))))
-    "devices"  (cmd-devices)
-    "device"   (cmd-device rest-args)
-    "play"     (cmd-play rest-args)
-    "pause"    (cmd-pause)
-    "resume"   (cmd-resume)
-    "next"     (cmd-next)
-    "prev"     (cmd-prev)
-    "queue"    (cmd-queue rest-args)
-    "now"      (cmd-now)
-    "--complete" (complete! rest-args)
-    (nil "--help" "-h") (usage)
-    (do (usage)
-        (throw (ex-info "" {:babashka/exit 1})))))
+(when (= *file* (System/getProperty "babashka.file"))
+  (let [args *command-line-args*
+        cmd  (first args)
+        rest-args (rest args)]
+    (case cmd
+      "auth"     (auth! rest-args)
+      "search"   (cmd-search rest-args)
+      "playlists" (cmd-playlists)
+      "playlist" (let [subcmd (first rest-args)
+                       sub-args (rest rest-args)]
+                   (case subcmd
+                     "create" (cmd-playlist-create sub-args)
+                     "add"    (cmd-playlist-add sub-args)
+                     "remove" (cmd-playlist-remove sub-args)
+                     "show"   (cmd-playlist-show sub-args)
+                     (do (when subcmd
+                           (println "Unknown playlist command:" subcmd))
+                         (usage)
+                         (throw (ex-info "" {:babashka/exit 1})))))
+      "devices"  (cmd-devices)
+      "device"   (cmd-device rest-args)
+      "play"     (cmd-play rest-args)
+      "pause"    (cmd-pause)
+      "resume"   (cmd-resume)
+      "next"     (cmd-next)
+      "prev"     (cmd-prev)
+      "queue"    (cmd-queue rest-args)
+      "now"      (cmd-now)
+      "--complete" (complete! rest-args)
+      (nil "--help" "-h") (usage)
+      (do (usage)
+          (throw (ex-info "" {:babashka/exit 1}))))))
