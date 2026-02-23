@@ -1,97 +1,75 @@
-# AGENTS.md — bb-spotify
+# bb-spotify
 
 Babashka CLI for the Spotify Web API. Single script, no external dependencies.
 
-## Binary
+## Files
 
-`spotify` in the repo root (symlinked to `~/.local/bin/spotify`).
+| File                       | Purpose                                    |
+|----------------------------|--------------------------------------------|
+| `spotify`                  | Main script (symlinked to `~/.local/bin/`) |
+| `spotify_test.bb`          | Unit tests (`bb spotify_test.bb`)          |
+| `completions/spotify.bash` | Bash tab-completion                        |
 
-## Commands
-
-### Setup
+## Auth
 
 ```bash
 spotify auth <client-id>   # Save client ID + authenticate via browser OAuth (PKCE)
+spotify auth               # Authenticate using SPOTIFY_CLIENT_ID env var or saved config
 ```
 
-Client ID is persisted to `~/.config/bb-spotify/config.edn`. Tokens to `~/.config/bb-spotify/tokens.edn`. Auth is interactive (opens browser) — only needed once, tokens auto-refresh.
+Client ID lookup order: `SPOTIFY_CLIENT_ID` env var > `~/.config/bb-spotify/config.edn`.
+Tokens: `~/.config/bb-spotify/tokens.edn` (auto-refresh).
 
-### Search
+## Commands
 
 ```bash
-spotify search <query>     # Returns up to 10 tracks
+# Search
+spotify search <query>               # Up to 10 tracks. Columns: #, Track, Artist, URI
+
+# Playlists
+spotify playlists                     # List all (Name, Tracks, ID)
+spotify playlist create <name>        # Create private playlist
+spotify playlist show <id>            # List tracks
+spotify playlist add <id> <uri>...    # Add tracks (batch)
+spotify playlist remove <id> <uri>... # Remove tracks
+
+# Devices
+spotify devices                       # List devices. Active marked *
+spotify device <name-or-id>           # Transfer playback
+spotify device <name-or-id> play      # Transfer + start playing
+
+# Playback
+spotify play                          # Resume
+spotify play <uri>                    # Play track or playlist URI
+spotify play <name>                   # Play playlist by name (fuzzy match)
+spotify pause
+spotify resume
+spotify next
+spotify prev
+spotify queue                         # Show now playing + upcoming
+spotify queue <uri>                   # Add track to queue
+spotify now                           # Current track info + progress
 ```
 
-Output columns: `#`, `Track`, `Artist`, `URI`. Use the URI in other commands.
-
-### Playlists
-
-```bash
-spotify playlists                        # List all user playlists (Name, Tracks, ID)
-spotify playlist create <name>           # Create private playlist → returns ID and URI
-spotify playlist show <id>               # List tracks in playlist (#, Track, Artist)
-spotify playlist add <id> <uri> [uri...] # Add tracks by URI (batch supported)
-spotify playlist remove <id> <uri>...    # Remove tracks by URI
-```
-
-### Devices
-
-```bash
-spotify devices                      # List available devices (name, type, ID). Active marked *
-spotify device <name-or-id>          # Transfer playback to device (keeps play state)
-spotify device <name-or-id> play     # Transfer and force start playing
-```
-
-Device accepts an exact ID or a case-insensitive substring of the device name (e.g. `spotify device dot play`).
-
-### Playback
-
-Requires an active Spotify device. Use `spotify devices` + `spotify device` to select one.
-
-```bash
-spotify play [uri]         # No args = resume. Accepts track or playlist URIs.
-spotify pause              # Pause playback
-spotify resume             # Resume playback
-spotify next               # Skip to next track
-spotify prev               # Previous track
-spotify queue <uri>        # Add track to playback queue
-spotify now                # Show currently playing (track, artist, album, URI, progress)
-```
+Device name matching: case-insensitive substring (e.g. `spotify device dot`).
+Playlist name matching: exact then substring, case-insensitive.
 
 ## URI Format
 
-- Track: `spotify:track:<id>` — from `spotify search` output
-- Playlist: `spotify:playlist:<id>` — from `spotify playlists` or `spotify playlist create`
+- Track: `spotify:track:<id>`
+- Playlist: `spotify:playlist:<id>`
 
-## Common Workflows
+## Errors
 
-```bash
-# Find and play a song
-spotify search "All Blues Miles Davis"
-spotify play spotify:track:<id-from-search>
-
-# Build a playlist
-spotify playlist create "My Playlist"
-spotify search "Blue Monk Thelonious Monk"
-spotify playlist add <playlist-id> spotify:track:<id1> spotify:track:<id2>
-spotify play spotify:playlist:<playlist-id>
-
-# Batch add — pass multiple URIs in one call
-spotify playlist add <id> spotify:track:aaa spotify:track:bbb spotify:track:ccc
-```
-
-## Error Handling
-
-| Error                        | Meaning                                                  | Fix                                      |
-|------------------------------|----------------------------------------------------------|------------------------------------------|
-| `Not authenticated`          | No tokens found                                          | Run `spotify auth <client-id>`           |
-| `No active device found`     | Spotify app not open or hasn't played anything yet        | `spotify devices` then `spotify device <name> play` |
-| `Restriction violated`       | Action invalid in current state (e.g. prev with no queue) | Expected; handle gracefully              |
-| `Token refresh failed`       | Refresh token expired or revoked                         | Re-run `spotify auth`                    |
+| Error                    | Fix                                                      |
+|--------------------------|----------------------------------------------------------|
+| `Not authenticated`      | `spotify auth <client-id>` or set `SPOTIFY_CLIENT_ID`   |
+| `No active device found` | `spotify devices` then `spotify device <name> play`      |
+| `Restriction violated`   | Action not valid in current state                        |
+| `Token refresh failed`   | Re-run `spotify auth`                                    |
 
 ## Notes
 
-- Search returns max 10 results per query (Spotify API limit)
-- `spotify play` with no URI is equivalent to `spotify resume`
-- Playlist IDs and track URIs are stable — safe to store and reuse
-- All commands exit 0 on success, 1 on error with a message to stdout
+- All commands exit 0 on success, 1 on error
+- `spotify play` with no args is equivalent to `spotify resume`
+- Search hardcodes limit=10 results

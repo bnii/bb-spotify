@@ -4,8 +4,8 @@ A single-file Babashka CLI for Spotify. No daemon, no external deps — just a s
 
 ## Prerequisites
 
-- [Babashka](https://github.com/babashka/babashka) installed
-- Spotify Premium account (Dev Mode requirement)
+- [Babashka](https://github.com/babashka/babashka)
+- A Spotify account
 
 ## Setup
 
@@ -16,52 +16,56 @@ A single-file Babashka CLI for Spotify. No daemon, no external deps — just a s
 3. In **Settings** > **Redirect URIs**, add: `http://127.0.0.1:12983/callback`
 4. Copy the **Client ID**
 
-### 2. Set environment variable
-
-Add to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
+### 2. Authenticate
 
 ```bash
-export SPOTIFY_CLIENT_ID="your_client_id_here"
+spotify auth <your-client-id>
 ```
 
-### 3. Authenticate
+This saves your client ID and opens the browser for Spotify login. Tokens are stored in `~/.config/bb-spotify/` and auto-refresh.
+
+Alternatively, set `SPOTIFY_CLIENT_ID` as an env var and run `spotify auth` without arguments.
+
+## Usage
 
 ```bash
-spotify auth
-```
-
-This opens your browser for Spotify login and saves tokens to `~/.config/bb-spotify/tokens.edn`.
-
-## Commands
-
-### Search
-
-```bash
+# Search
 spotify search "All Blues Miles Davis"
+
+# Playlists
+spotify playlists
+spotify playlist create "Jazz Blues Essentials"
+spotify playlist show <id>
+spotify playlist add <id> <uri> [uri...]
+spotify playlist remove <id> <uri> [uri...]
+
+# Devices
+spotify devices                       # List available devices
+spotify device <name-or-id> [play]    # Transfer playback (name is fuzzy-matched)
+
+# Playback
+spotify play <uri>                    # Track or playlist URI
+spotify play <playlist-name>          # Play playlist by name (fuzzy match)
+spotify pause
+spotify resume
+spotify next / prev
+spotify queue                         # Show queue
+spotify queue <uri>                   # Add to queue
+spotify now                           # What's playing
 ```
 
-### Playlists
+Run `spotify --help` for the full reference.
+
+## Bash Completion
 
 ```bash
-spotify playlists                              # List your playlists
-spotify playlist create "Jazz Blues Essentials" # Create a playlist
-spotify playlist show <id>                     # Show playlist contents
-spotify playlist add <id> <uri> [uri...]       # Add tracks
-spotify playlist remove <id> <uri> [uri...]    # Remove tracks
+source /path/to/completions/spotify.bash
+# or copy to:
+# ~/.local/share/bash-completion/completions/spotify
 ```
 
-### Playback
+Completes commands, subcommands, device names, and playlist names.
 
-```bash
-spotify play <uri>       # Play a track or playlist URI
-spotify pause            # Pause
-spotify resume           # Resume
-spotify next             # Next track
-spotify prev             # Previous track
-spotify queue <uri>      # Add to queue
-spotify now              # Show what's playing
-```
+## Token Storage
 
-## Token storage
-
-Tokens are stored in `~/.config/bb-spotify/tokens.edn` and auto-refresh before expiry.
+Tokens in `~/.config/bb-spotify/tokens.edn`, client ID in `config.edn`. Tokens auto-refresh before expiry.
