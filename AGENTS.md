@@ -34,9 +34,19 @@ spotify playlist add <id> <uri> [uri...] # Add tracks by URI (batch supported)
 spotify playlist remove <id> <uri>...    # Remove tracks by URI
 ```
 
+### Devices
+
+```bash
+spotify devices                      # List available devices (name, type, ID). Active marked *
+spotify device <name-or-id>          # Transfer playback to device (keeps play state)
+spotify device <name-or-id> play     # Transfer and force start playing
+```
+
+Device accepts an exact ID or a case-insensitive substring of the device name (e.g. `spotify device dot play`).
+
 ### Playback
 
-Requires an active Spotify device (Spotify must be open and have played something).
+Requires an active Spotify device. Use `spotify devices` + `spotify device` to select one.
 
 ```bash
 spotify play [uri]         # No args = resume. Accepts track or playlist URIs.
@@ -75,7 +85,7 @@ spotify playlist add <id> spotify:track:aaa spotify:track:bbb spotify:track:ccc
 | Error                        | Meaning                                                  | Fix                                      |
 |------------------------------|----------------------------------------------------------|------------------------------------------|
 | `Not authenticated`          | No tokens found                                          | Run `spotify auth <client-id>`           |
-| `No active device found`     | Spotify app not open or hasn't played anything yet        | Open Spotify and play/pause any track    |
+| `No active device found`     | Spotify app not open or hasn't played anything yet        | `spotify devices` then `spotify device <name> play` |
 | `Restriction violated`       | Action invalid in current state (e.g. prev with no queue) | Expected; handle gracefully              |
 | `Token refresh failed`       | Refresh token expired or revoked                         | Re-run `spotify auth`                    |
 

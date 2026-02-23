@@ -180,7 +180,7 @@
                          :throw   false}
                         opts))
          raw   (:body resp)
-         body  (when (and raw (not (str/blank? raw)) (str/starts-with? (str/triml raw) "{"))
+         body  (when (and raw (not (str/blank? raw)) (re-find #"^\s*[\{\[]" raw))
                  (json/parse-string raw true))]
      (if (<= 200 (:status resp) 299)
        body
@@ -212,9 +212,17 @@
                           0 (min 25 (count (str/join ", " (map :name (:artists track))))))
                     (:uri track))))))))
 
+(defn paginate [path key]
+  (loop [url path
+         acc []]
+    (let [resp (api! :get url)
+          items (into acc (get resp key))]
+      (if-let [nxt (:next resp)]
+        (recur nxt items)
+        items))))
+
 (defn cmd-playlists []
-  (let [resp  (api! :get "/me/playlists?limit=50")
-        lists (:items resp)]
+  (let [lists (paginate "/me/playlists?limit=50" :items)]
     (if (empty? lists)
       (println "No playlists found.")
       (do
@@ -263,9 +271,8 @@
   (when (empty? args)
     (println "Usage: spotify playlist show <id>")
     (throw (ex-info "" {:babashka/exit 1})))
-  (let [id   (first args)
-        resp (api! :get (str "/playlists/" id "/tracks?limit=100"))
-        items (:items resp)]
+  (let [id    (first args)
+        items (paginate (str "/playlists/" id "/tracks?limit=100") :items)]
     (if (empty? items)
       (println "Playlist is empty.")
       (do
@@ -325,7 +332,7 @@
     (do (api! :put "/me/player/play" {:body "{}"})
         (println "Resumed playback."))
     (let [uri (first args)]
-      (if (str/includes? uri "track")
+      (if (str/starts-with? uri "spotify:track:")
         (api! :put "/me/player/play"
           {:body (json/generate-string {:uris [uri]})})
         (api! :put "/me/player/play"
@@ -398,8 +405,9 @@ PLAYLISTS
 
 DEVICES
   spotify devices             List available devices (name, type, ID). Active device marked *.
-  spotify device <id>         Transfer playback to device (keeps current play state).
-  spotify device <id> play    Transfer playback and force start playing.
+  spotify device <name-or-id>      Transfer playback to device (keeps current play state).
+  spotify device <name-or-id> play Transfer and force start playing.
+                              Accepts device ID or name (case-insensitive substring match).
 
 PLAYBACK (requires an active Spotify device)
   spotify play [uri]          With no args: resume playback.
@@ -458,5 +466,6 @@ ERRORS
     "prev"     (cmd-prev)
     "queue"    (cmd-queue rest-args)
     "now"      (cmd-now)
+    (nil "--help" "-h") (usage)
     (do (usage)
-        (when cmd (throw (ex-info "" {:babashka/exit 1}))))))
+        (throw (ex-info "" {:babashka/exit 1})))))
