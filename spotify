@@ -375,6 +375,36 @@
         (println (str "  Progress: " (quot (:progress_ms resp) 1000) "s / "
                       (quot (:duration_ms track) 1000) "s"))))))
 
+;; ── Completion ────────────────────────────────────────────────────────────────
+
+(defn complete! [args]
+  (try
+    (let [cword  (parse-long (first args))
+          words  (vec (rest args))
+          cur    (str/lower-case (get words cword ""))
+          cmd    (get words 1 "")
+          match? (fn [s] (str/starts-with? (str/lower-case s) cur))
+          emit!  (fn [xs] (doseq [x xs] (when (match? x) (println x))))]
+      (cond
+        (= cword 1)
+        (emit! ["auth" "search" "playlists" "playlist" "devices" "device"
+                "play" "pause" "resume" "next" "prev" "queue" "now"])
+
+        (and (= cmd "playlist") (= cword 2))
+        (emit! ["create" "show" "add" "remove"])
+
+        (and (= cmd "device") (= cword 2))
+        (try
+          (let [devs (:devices
+                       (binding [*out* (java.io.StringWriter.)]
+                         (api! :get "/me/player/devices")))]
+            (emit! (mapcat (fn [d] [(:name d) (:id d)]) devs)))
+          (catch Exception _ nil))
+
+        (and (= cmd "device") (= cword 3))
+        (emit! ["play"])))
+    (catch Exception _ nil)))
+
 ;; ── CLI Dispatch ──────────────────────────────────────────────────────────────
 
 (defn usage []
@@ -466,6 +496,7 @@ ERRORS
     "prev"     (cmd-prev)
     "queue"    (cmd-queue rest-args)
     "now"      (cmd-now)
+    "--complete" (complete! rest-args)
     (nil "--help" "-h") (usage)
     (do (usage)
         (throw (ex-info "" {:babashka/exit 1})))))
