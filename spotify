@@ -278,6 +278,48 @@
                       (subs (:name track) 0 (min 40 (count (:name track))))
                       (str/join ", " (map :name (:artists track)))))))))))
 
+(defn cmd-devices []
+  (let [resp  (api! :get "/me/player/devices")
+        devs  (:devices resp)]
+    (if (empty? devs)
+      (println "No devices found. Open Spotify on a device first.")
+      (do
+        (println (format "%-3s %-30s %-15s %s" "" "Name" "Type" "ID"))
+        (println (apply str (repeat 80 "-")))
+        (doseq [d devs]
+          (println (format "%-3s %-30s %-15s %s"
+                    (if (:is_active d) "*" "")
+                    (subs (:name d) 0 (min 30 (count (:name d))))
+                    (:type d)
+                    (:id d))))))))
+
+(defn resolve-device [name-or-id]
+  (let [resp (api! :get "/me/player/devices")
+        devs (:devices resp)
+        needle (str/lower-case name-or-id)
+        match (or (first (filter #(= (:id %) name-or-id) devs))
+                  (first (filter #(str/includes? (str/lower-case (:name %)) needle) devs)))]
+    (when-not match
+      (println (str "No device matching \"" name-or-id "\" found."))
+      (println "Available devices:")
+      (doseq [d devs]
+        (println (str "  " (:name d) " (" (:type d) ") — " (:id d))))
+      (throw (ex-info "" {:babashka/exit 1})))
+    match))
+
+(defn cmd-device [args]
+  (when (empty? args)
+    (println "Usage: spotify device <name-or-id>")
+    (println "       spotify device <name-or-id> play")
+    (println "Run `spotify devices` to list available devices.")
+    (throw (ex-info "" {:babashka/exit 1})))
+  (let [device (resolve-device (first args))
+        play?  (= "play" (second args))]
+    (api! :put "/me/player"
+      {:body (json/generate-string {:device_ids [(:id device)] :play play?})})
+    (println (str "Transferred playback to " (:name device)
+                  (when play? " (playing)")))))
+
 (defn cmd-play [args]
   (if (empty? args)
     (do (api! :put "/me/player/play" {:body "{}"})
@@ -354,6 +396,11 @@ PLAYLISTS
   spotify playlist add <id> <uri>...      Add one or more tracks by URI. Batch supported.
   spotify playlist remove <id> <uri>...   Remove one or more tracks by URI.
 
+DEVICES
+  spotify devices             List available devices (name, type, ID). Active device marked *.
+  spotify device <id>         Transfer playback to device (keeps current play state).
+  spotify device <id> play    Transfer playback and force start playing.
+
 PLAYBACK (requires an active Spotify device)
   spotify play [uri]          With no args: resume playback.
                               With a track URI (spotify:track:...): play that track.
@@ -381,7 +428,7 @@ COMMON WORKFLOWS
 
 ERRORS
   \"Not authenticated\"        → Run: spotify auth <client-id>
-  \"No active device found\"   → Open Spotify on a device and play/pause something first.
+  \"No active device found\"   → Run: spotify devices, then: spotify device <id> play
   \"Restriction violated\"     → Action not possible in current state (e.g. prev with no history)."))
 
 (let [args *command-line-args*
@@ -402,6 +449,8 @@ ERRORS
                          (println "Unknown playlist command:" subcmd))
                        (usage)
                        (throw (ex-info "" {:babashka/exit 1})))))
+    "devices"  (cmd-devices)
+    "device"   (cmd-device rest-args)
     "play"     (cmd-play rest-args)
     "pause"    (cmd-pause)
     "resume"   (cmd-resume)
